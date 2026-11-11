@@ -22,6 +22,13 @@ import cn.classfun.droidvm.ui.vm.display.base.DisplaySource;
  */
 public final class NativeSurfaceSource implements DisplaySource {
     private final DisplayProvider provider;
+    private final Handler mainHandler;
+    /** Sends a size to the VM (vm_gpu_resize); null on screens without a resizable display. */
+    private java.util.function.BiConsumer<Integer, Integer> guestResizer;
+    private int pendingW, pendingH, sentW, sentH;
+    private final Runnable sendResize = this::flushResize;
+    /** Area changes arrive per layout pass while a window is dragged; send the size it settles on. */
+    private static final long RESIZE_SETTLE_MS = 350;
 
     /**
      * @param displayBinderSupplier resolves the per-VM display binder (blocking, called off the
@@ -30,6 +37,7 @@ public final class NativeSurfaceSource implements DisplaySource {
     public NativeSurfaceSource(@NonNull SurfaceView surfaceView, int guestWidth, int guestHeight,
                                @NonNull Supplier<IBinder> displayBinderSupplier,
                                @NonNull Handler mainHandler, @NonNull Callbacks callbacks) {
+        this.mainHandler = mainHandler;
         provider = new DisplayProvider(surfaceView, guestWidth, guestHeight, displayBinderSupplier,
             connected -> mainHandler.post(() -> callbacks.onStateChanged(
                 connected ? State.CONNECTED : State.CONNECTING)),
@@ -60,15 +68,34 @@ public final class NativeSurfaceSource implements DisplaySource {
 
     @Override
     public void shutdown() {
+        mainHandler.removeCallbacks(sendResize);
         provider.shutdown();
+    }
+
+    /** Lets the guest display follow the window (virtio-gpu screens only). */
+    public void setGuestResizer(java.util.function.BiConsumer<Integer, Integer> resizer) {
+        guestResizer = resizer;
     }
 
     @Override
     public boolean supportsGuestResize() {
-        return false;
+        return guestResizer != null;
     }
 
     @Override
     public void requestGuestResize(int width, int height) {
+        if (guestResizer == null || width <= 0 || height <= 0) return;
+        // Even sizes in steps of 8: what guests' mode tables and scanout strides like best.
+        pendingW = Math.max(640, width & ~7);
+        pendingH = Math.max(480, height & ~7);
+        mainHandler.removeCallbacks(sendResize);
+        mainHandler.postDelayed(sendResize, RESIZE_SETTLE_MS);
+    }
+
+    private void flushResize() {
+        if (guestResizer == null || (pendingW == sentW && pendingH == sentH)) return;
+        sentW = pendingW;
+        sentH = pendingH;
+        guestResizer.accept(sentW, sentH);
     }
 }

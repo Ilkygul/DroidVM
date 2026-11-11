@@ -172,6 +172,8 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     // the physical keyboard is up.
     private static final String KEY_KEYBOARD_MODE = "display_keyboard_mode";
     private static final String KEY_ZONE_EXTRA = "display_keyboard_zone_extra";
+    /** Guest display follows the window on virtio-gpu screens (default on). */
+    private static final String KEY_AUTO_RESIZE = "display_auto_resize";
     private static final String KEY_ZONE_FNX = "display_keyboard_zone_fnx";
     // Unified MOUSE/TABLET gesture layer (two-finger tap = right click, two-finger pan = scroll,
     // three-finger = local zoom/pan). TOUCH mode bypasses it and stays raw multi-touch.
@@ -377,6 +379,20 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
                     onDisplayStateChanged(state);
                 }
             });
+        // virtio-gpu screens can be resized from here; the simplefb screen has a fixed size.
+        if (screenId != null && screenId.startsWith("gpu")
+            && getSharedPreferences(INPUT_PREFS, MODE_PRIVATE).getBoolean(KEY_AUTO_RESIZE, true)) {
+            ((NativeSurfaceSource) displaySource).setGuestResizer((w, h) ->
+                DaemonConnection.getInstance().buildRequest("vm_gpu_resize")
+                    .put("vm_id", vmId)
+                    .put("width", w)
+                    .put("height", h)
+                    .onResponse(r -> Log.i(TAG, fmt("guest display resized to %dx%d", w, h)))
+                    .onUnsuccessful(r -> Log.w(TAG, fmt("guest resize %dx%d refused: %s", w, h, r)))
+                    .onError(e -> Log.w(TAG, "vm_gpu_resize failed", e))
+                    .invoke());
+            viewport.setAutoResize(true);
+        }
         // Hardware cursor: give crosvm a Surface for the guest's cursor plane and follow the
         // positions it reports. Both are no-ops on a guest that never uses the cursor plane.
         // This must run here, on the main thread with displaySource assigned -- it used to sit
@@ -830,7 +846,9 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
 
                 @Override
                 public void onGuestResizeWanted(int areaW, int areaH) {
-                    // Auto-resize Guest Display: no guest-side channel on this path yet.
+                    // The guest display follows the window (virtio-gpu screen, vm_gpu_resize).
+                    if (displaySource != null && displaySource.supportsGuestResize())
+                        displaySource.requestGuestResize(areaW, areaH);
                 }
             });
         viewport.setContentSize(guestWidth, guestHeight);

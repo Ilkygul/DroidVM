@@ -99,6 +99,8 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
         }
         if (text.equals(lastFromGuest) || text.equals(lastSent)) return;
         if (text.getBytes(UTF_8).length > MAX_BYTES) return;
+        // Not connected yet: leave lastSent alone, the connect sends the clipboard again.
+        if (out == null) return;
         lastSent = text;
         final String line = "T " + Base64.encodeToString(text.getBytes(UTF_8), Base64.NO_WRAP) + "\n";
         sender.execute(() -> {
@@ -120,7 +122,10 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
                 socket = s;
                 out = s.getOutputStream();
                 Log.i(TAG, "connected to guest clipboard at " + host + ":" + port);
-                main.post(this::pushAndroidClipboard);
+                main.post(() -> {
+                    lastSent = null; // a fresh guest session has nothing of ours yet
+                    pushAndroidClipboard();
+                });
                 var in = new BufferedReader(new InputStreamReader(s.getInputStream(), UTF_8));
                 String line;
                 while (running && (line = in.readLine()) != null) {

@@ -559,6 +559,12 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
         displayContainer.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or2, ob) ->
             v.setSystemGestureExclusionRects(
                 java.util.Collections.singletonList(new android.graphics.Rect(0, 0, r - l, b - t))));
+        // Captured-pointer events go to whichever view holds focus, and that is usually this invisible
+        // keyboard editor (it takes focus for the IME), not the surface: give it the same listener, and
+        // the decor view for the moment nothing is focused. Without this, capture started but every
+        // captured move/click was dropped.
+        keyboardInput.setOnCapturedPointerListener(this::onCapturedPointer);
+        getWindow().getDecorView().setOnCapturedPointerListener(this::onCapturedPointer);
         keyboardInput.setTextInputListener(new NativeKeyboardEditText.TextInputListener() {
             @Override
             public void onCommitText(@NonNull CharSequence text) {

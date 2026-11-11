@@ -172,6 +172,20 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     // the physical keyboard is up.
     private static final String KEY_KEYBOARD_MODE = "display_keyboard_mode";
     private static final String KEY_ZONE_EXTRA = "display_keyboard_zone_extra";
+    /** Guest UI size relative to Android's on the same screen, in percent (desktop UIs sit denser). */
+    private static final String KEY_GUEST_UI_SCALE = "display_guest_ui_scale";
+
+    /**
+     * The density the guest is told (EDID physical size): this screen's Android density times the
+     * guest UI preference. Windows (viogpuap) turns it into its scale as density / 160, the same rule
+     * Android uses, so a window on the inner screen, the cover screen or a DeX monitor each gets the
+     * scale that screen calls for.
+     */
+    private int guestDpi() {
+        int pct = getSharedPreferences(INPUT_PREFS, MODE_PRIVATE).getInt(KEY_GUEST_UI_SCALE, 75);
+        return getResources().getDisplayMetrics().densityDpi * pct / 100;
+    }
+
     /** Guest display follows the window on virtio-gpu screens (default on). */
     private static final String KEY_AUTO_RESIZE = "display_auto_resize";
     private static final String KEY_ZONE_FNX = "display_keyboard_zone_fnx";
@@ -387,6 +401,7 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
                     .put("vm_id", vmId)
                     .put("width", w)
                     .put("height", h)
+                    .put("dpi", guestDpi())
                     .onResponse(r -> Log.i(TAG, fmt("guest display resized to %dx%d", w, h)))
                     .onUnsuccessful(r -> Log.w(TAG, fmt("guest resize %dx%d refused: %s", w, h, r)))
                     .onError(e -> Log.w(TAG, "vm_gpu_resize failed", e))

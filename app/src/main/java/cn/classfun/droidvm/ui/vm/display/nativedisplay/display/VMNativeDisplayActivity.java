@@ -823,6 +823,8 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     }
 
     private void startPointerCapture() {
+        capLogBudget = 40;
+        Log.i(TAG, "pointer capture requested");
         capSpeed = Math.max(1, getSharedPreferences(INPUT_PREFS, MODE_PRIVATE)
             .getInt(KEY_CAPTURED_MOUSE_SPEED, 100)) / 100f;
         surfaceView.requestFocus();
@@ -871,7 +873,15 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
 
     // Raw relative motion, buttons and wheel from the captured pointer, always to the guest's
     // RELATIVE mouse -- also in TABLET mode, where the absolute device would need a position.
+    private int capLogBudget = 0;
+
     private boolean onCapturedPointer(View v, MotionEvent event) {
+        if (capLogBudget > 0) {
+            capLogBudget--;
+            Log.i(TAG, fmt("captured %s on %s src=0x%x x=%.1f y=%.1f fwd=%b connected=%b",
+                MotionEvent.actionToString(event.getActionMasked()), v.getClass().getSimpleName(),
+                event.getSource(), event.getX(), event.getY(), inputForwarder != null, connected));
+        }
         var fwd = inputForwarder;
         if (fwd == null || !connected) return false;
         switch (event.getActionMasked()) {

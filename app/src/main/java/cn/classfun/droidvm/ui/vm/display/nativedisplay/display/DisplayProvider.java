@@ -271,6 +271,11 @@ final class DisplayProvider {
         // needsSend, so the layout-driven surfaceChanged this triggers won't re-send the surface.
         mainView.getHolder().setFixedSize(width, height);
         onDisplayConfig.accept(config);
+        // A guest that changes size while this surface lives (window follows the DeX window, fold or
+        // unfold) left the screen showing an earlier frame at the old size over the new one, until the
+        // console was reopened. Do what reopening does: hand crosvm brand-new surfaces for the new size.
+        recreateSurface(mainView);
+        if (cursorView != null) recreateSurface(cursorView);
     }
 
     private void applyPendingSurface() {

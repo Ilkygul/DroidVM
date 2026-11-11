@@ -159,6 +159,8 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     private int guestHeight = 720;
 
     private DisplaySource displaySource;
+    /** Shared clipboard with the guest's clipsync agent (null when switched off). */
+    private ClipboardBridge clipboardBridge;
     private InputForwarder inputForwarder;
     private DirectInputSink directSink;
     private NativeExtraKeysPanel nativeExtraKeys;
@@ -172,6 +174,11 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     // the physical keyboard is up.
     private static final String KEY_KEYBOARD_MODE = "display_keyboard_mode";
     private static final String KEY_ZONE_EXTRA = "display_keyboard_zone_extra";
+    /** Share the clipboard with a guest agent on the NAT network (default on). */
+    private static final String KEY_CLIPBOARD = "display_clipboard";
+    /** Guest address of that agent; the Windows image's NAT lease is 10.77.0.100. */
+    private static final String KEY_CLIPBOARD_HOST = "display_clipboard_host";
+
     /** Guest UI size relative to Android's on the same screen, in percent (desktop UIs sit denser). */
     private static final String KEY_GUEST_UI_SCALE = "display_guest_ui_scale";
 
@@ -1070,6 +1077,12 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     @Override
     protected void onStart() {
         super.onStart();
+        var prefs = getSharedPreferences(INPUT_PREFS, MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_CLIPBOARD, true)) {
+            clipboardBridge = new ClipboardBridge(this,
+                prefs.getString(KEY_CLIPBOARD_HOST, "10.77.0.100"), 6201);
+            clipboardBridge.start();
+        }
         var handler = ((DroidVMApp) getApplication()).getVMEventHandler();
         if (handler != null) handler.addForegroundCallback(eventKey, this);
     }
@@ -1077,6 +1090,10 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     @Override
     protected void onStop() {
         super.onStop();
+        if (clipboardBridge != null) {
+            clipboardBridge.stop();
+            clipboardBridge = null;
+        }
         var handler = ((DroidVMApp) getApplication()).getVMEventHandler();
         if (handler != null) handler.removeForegroundCallback(eventKey);
     }
@@ -1145,6 +1162,13 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
                 phyKeyboard.clearHardwareKeys();
             }
         });
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        // Android hands the clipboard only to the focused app: this is the moment to send it.
+        if (hasFocus && clipboardBridge != null) clipboardBridge.onFocus();
     }
 
     @Override

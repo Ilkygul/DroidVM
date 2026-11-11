@@ -85,9 +85,15 @@ public final class NativeSurfaceSource implements DisplaySource {
     @Override
     public void requestGuestResize(int width, int height) {
         if (guestResizer == null || width <= 0 || height <= 0) return;
+        // A small window (a fresh DeX window, the cover screen) must not push the guest below a
+        // desktop it can use (Windows will not take 1032x480): grow the size, keeping the window's
+        // shape, until it is at least 1280x720; the view scales the picture down to the window.
+        double grow = Math.max(1.0, Math.max(1280.0 / width, 720.0 / height));
+        width = (int) Math.round(width * grow);
+        height = (int) Math.round(height * grow);
         // Even sizes in steps of 8: what guests' mode tables and scanout strides like best.
-        pendingW = Math.max(640, width & ~7);
-        pendingH = Math.max(480, height & ~7);
+        pendingW = width & ~7;
+        pendingH = height & ~7;
         mainHandler.removeCallbacks(sendResize);
         mainHandler.postDelayed(sendResize, RESIZE_SETTLE_MS);
     }

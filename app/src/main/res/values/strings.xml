@@ -1131,6 +1131,9 @@
     <string name="native_display_waiting">Waiting for VM display...</string>
     <string name="native_display_connected">Connected - %1$dx%2$d</string>
     <string name="native_display_failed">Failed to start native display</string>
+    <string name="native_display_mouse_locked">Mouse locked - press Ctrl+Alt+L to release</string>
+    <string name="native_display_mouse_lock_on">Mouse lock: on</string>
+    <string name="native_display_mouse_lock_off">Mouse lock: off</string>
 
     <string name="vnc_menu_keyboard">Soft Keyboard</string>
     <string name="vnc_menu_extra_keys">Extra Keys</string>

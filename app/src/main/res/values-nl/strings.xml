@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="native_display_mouse_locked">Muis vergrendeld — Ctrl+Alt+L om los te laten</string>
+    <string name="native_display_mouse_lock_on">Muisvergrendeling: aan</string>
+    <string name="native_display_mouse_lock_off">Muisvergrendeling: uit</string>
+</resources>

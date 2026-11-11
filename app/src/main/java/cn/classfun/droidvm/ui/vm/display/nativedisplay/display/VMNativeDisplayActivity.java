@@ -205,6 +205,30 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     // (or OEM's) right-click fallback, regardless of what source it claims - swallow it.
     private long lastMouseButtonMs;
     private static final long MOUSE_BACK_SUPPRESS_MS = 800;
+
+    /** A physical mouse click inside the display captures the pointer (default on). */
+    private static final String KEY_MOUSE_LOCK = "display_mouse_lock";
+    /** Captured-pointer speed in percent of the raw device motion (default 100). */
+    private static final String KEY_CAPTURED_MOUSE_SPEED = "display_captured_mouse_speed";
+    // Evdev KEY_* codes of the release chord, as the daemon's key feed reports them.
+    private static final int KEY_L = 38, KEY_LEFTCTRL = 29, KEY_LEFTALT = 56,
+        KEY_RIGHTCTRL = 97, KEY_RIGHTALT = 100;
+    // The "pointer locked" hint is shown once per process, not per (re)created activity.
+    private static boolean mouseLockHintShown = false;
+    // True while Android has this window's pointer captured; the truth comes from
+    // onPointerCaptureChanged, not from our request, which can be refused (no window focus).
+    private boolean pointerCaptured = false;
+    // Fractional remainders of captured motion / wheel, and the guest buttons currently held by
+    // it (so a release of the capture can let go of them instead of leaving them stuck).
+    private float capRemX, capRemY, capScrollV, capScrollH;
+    private final java.util.HashSet<Short> capButtonsDown = new java.util.HashSet<>();
+    private float capSpeed = 1f;
+    // The click that starts a capture is swallowed up to its ACTION_UP, so it is not also a guest click.
+    private boolean swallowMouseGesture = false;
+    // Swallow the L that completes the release chord (down and up) so the guest sees neither half.
+    private boolean swallowChordKey = false;
+    // Modifier state of the grabbed keyboard, from the daemon's key feed.
+    private boolean feedCtrl, feedAlt;
     // Single sources of truth for viewport geometry (fit/zoom/pan across display-area changes)
     // and chrome visibility (fullscreen / extra keys). See the controller classes for the rules.
     private DisplayViewportController viewport;
@@ -505,6 +529,11 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
             v.post(() -> viewport.setArea(cw, ch));
         });
         surfaceView.setOnTouchListener(this::onSurfaceTouch);
+        // Captured-pointer input (see startPointerCapture) is delivered to the focused view's
+        // OnCapturedPointerListener, so the surface has to be able to take focus.
+        surfaceView.setFocusable(true);
+        surfaceView.setFocusableInTouchMode(true);
+        surfaceView.setOnCapturedPointerListener(this::onCapturedPointer);
         // MOUSE/TABLET gestures live on the container: the whole display area (letterbox included)
         // is gesture surface; the translator pins coordinate ops to the rendered surface rect.
         // In TOUCH mode this listener declines and raw multi-touch stays on the surface view.
@@ -586,6 +615,7 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     // zoom transform is applied - Android inverse-maps them.) MOUSE/TABLET decline here so the
     // event bubbles up to the container.
     private boolean onSurfaceTouch(View v, MotionEvent event) {
+        if (handleMouseCaptureClick(event, false)) return true;
         if (inputMode != InputMode.TOUCH) return false;
         if (inputForwarder == null || v.getWidth() <= 0 || v.getHeight() <= 0) return false;
         if (isMouseButtonTouch(event)) return true;
@@ -597,6 +627,7 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     // MOUSE/TABLET gesture surface: the whole container is active; the translator pins gestures
     // that carry guest coordinates to the rendered surface rect.
     private boolean onContainerTouch(View v, MotionEvent event) {
+        if (handleMouseCaptureClick(event, true)) return true;
         if (inputMode == InputMode.TOUCH) return false;
         if (inputForwarder == null || gestureTranslator == null) return false;
         if (isMouseButtonTouch(event)) return true;
@@ -747,6 +778,178 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
         }
     }
 
+    // ---- Mouse lock (pointer capture) -------------------------------------------------------
+    // On DeX / an external monitor the Android pointer wanders out of the window (the taskbar pops
+    // up at the screen edge). Capturing the pointer hides it and delivers raw relative motion, which
+    // goes to the guest's relative mouse. Capture starts by clicking with a PHYSICAL mouse inside the
+    // display (a finger never starts it) and ends when the window loses focus / the activity pauses
+    // (Android drops the capture itself then), with Ctrl+Alt+L, or from the menu.
+    // Touch keeps working as before: a captured pointer only takes over the mouse's own events.
+
+    private boolean mouseLockEnabled() {
+        return getSharedPreferences(INPUT_PREFS, MODE_PRIVATE).getBoolean(KEY_MOUSE_LOCK, true);
+    }
+
+    private static boolean isPhysicalMouse(@NonNull MotionEvent event) {
+        return (event.getSource() & android.view.InputDevice.SOURCE_MOUSE) != 0
+            && event.getPointerCount() > 0
+            && event.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE;
+    }
+
+    // True when [event] belongs to a click that starts (or is the tail of) a capture and must not
+    // reach the normal touch/gesture path.
+    private boolean handleMouseCaptureClick(@NonNull MotionEvent event, boolean inContainer) {
+        if (swallowMouseGesture) {
+            int a = event.getActionMasked();
+            if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL)
+                swallowMouseGesture = false;
+            return true;
+        }
+        if (pointerCaptured || event.getActionMasked() != MotionEvent.ACTION_DOWN) return false;
+        if (!isPhysicalMouse(event) || !mouseLockEnabled()) return false;
+        if (inputForwarder == null || !connected || !hasWindowFocus()) return false;
+        // On the container (MOUSE/TABLET) the letterbox counts as outside the display.
+        if (inContainer && !displayRectInContainer().contains(event.getX(), event.getY()))
+            return false;
+        swallowMouseGesture = true;
+        startPointerCapture();
+        return true;
+    }
+
+    private void startPointerCapture() {
+        capSpeed = Math.max(1, getSharedPreferences(INPUT_PREFS, MODE_PRIVATE)
+            .getInt(KEY_CAPTURED_MOUSE_SPEED, 100)) / 100f;
+        surfaceView.requestFocus();
+        surfaceView.requestPointerCapture();
+    }
+
+    private void stopPointerCapture() {
+        if (surfaceView != null && surfaceView.hasPointerCapture())
+            surfaceView.releasePointerCapture();
+        // Do not wait for onPointerCaptureChanged to let go of held buttons: Android may never
+        // call it (activity paused/destroyed), and a stuck guest button is worse than a repeat.
+        releaseCapturedState();
+    }
+
+    private void releaseCapturedState() {
+        if (inputForwarder != null)
+            for (var b : capButtonsDown) inputForwarder.sendRelativeButton(b, false);
+        capButtonsDown.clear();
+        capRemX = capRemY = capScrollV = capScrollH = 0f;
+        feedCtrl = feedAlt = false;
+        swallowMouseGesture = false;
+        // The key feed was only needed to hear the release chord.
+        if (keyboardGrab != null) keyboardGrab.setKeyFeed(false);
+    }
+
+    // Window callback: Android confirms (or ends) the capture here, including the times it ends it
+    // itself (focus loss, another window taking the pointer).
+    @Override
+    public void onPointerCaptureChanged(boolean hasCapture) {
+        super.onPointerCaptureChanged(hasCapture);
+        pointerCaptured = hasCapture;
+        if (hasCapture) {
+            // A grabbed keyboard never reaches dispatchKeyEvent: the daemon's EVIOCGRAB hands its
+            // keys to the guest only, and its own escape chord ships unbound. So Ctrl+Alt+L is
+            // heard through the key feed instead (see wireHardwareKeyEcho); dispatchKeyEvent
+            // covers the ungrabbed case (system keyboard mode, or no grab).
+            if (keyboardGrab != null) keyboardGrab.setKeyFeed(true);
+            if (!mouseLockHintShown) {
+                mouseLockHintShown = true;
+                Toast.makeText(this, R.string.native_display_mouse_locked, Toast.LENGTH_LONG).show();
+            }
+        } else {
+            releaseCapturedState();
+        }
+    }
+
+    // Raw relative motion, buttons and wheel from the captured pointer, always to the guest's
+    // RELATIVE mouse -- also in TABLET mode, where the absolute device would need a position.
+    private boolean onCapturedPointer(View v, MotionEvent event) {
+        var fwd = inputForwarder;
+        if (fwd == null || !connected) return false;
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_MOVE:
+            case MotionEvent.ACTION_HOVER_MOVE: {
+                // Several samples can be batched into one event; getX/getY are deltas, so the
+                // history has to be added up or the pointer loses distance on fast flicks.
+                float dx = event.getX(), dy = event.getY();
+                for (int i = 0, n = event.getHistorySize(); i < n; i++) {
+                    dx += event.getHistoricalX(i);
+                    dy += event.getHistoricalY(i);
+                }
+                capRemX += dx * capSpeed;
+                capRemY += dy * capSpeed;
+                int ix = (int) capRemX, iy = (int) capRemY;
+                if (ix != 0 || iy != 0) {
+                    capRemX -= ix;
+                    capRemY -= iy;
+                    fwd.sendMouseMove(ix, iy);
+                }
+                return true;
+            }
+            case MotionEvent.ACTION_BUTTON_PRESS:
+            case MotionEvent.ACTION_BUTTON_RELEASE: {
+                lastMouseButtonMs = android.os.SystemClock.uptimeMillis();
+                short btn = mapCapturedButton(event.getActionButton());
+                boolean down = event.getActionMasked() == MotionEvent.ACTION_BUTTON_PRESS;
+                if (btn != 0) {
+                    if (down) capButtonsDown.add(btn);
+                    else capButtonsDown.remove(btn);
+                    fwd.sendRelativeButton(btn, down);
+                }
+                return true;
+            }
+            case MotionEvent.ACTION_SCROLL: {
+                capScrollV += event.getAxisValue(MotionEvent.AXIS_VSCROLL);
+                capScrollH += event.getAxisValue(MotionEvent.AXIS_HSCROLL);
+                int v1 = (int) capScrollV, h1 = (int) capScrollH;
+                if (v1 != 0 || h1 != 0) {
+                    capScrollV -= v1;
+                    capScrollH -= h1;
+                    fwd.sendRelativeScroll(v1, h1);
+                }
+                return true;
+            }
+            default:
+                return false;
+        }
+    }
+
+    private static short mapCapturedButton(int actionButton) {
+        switch (actionButton) {
+            case MotionEvent.BUTTON_PRIMARY:
+                return EvdevEncoder.BTN_LEFT;
+            case MotionEvent.BUTTON_SECONDARY:
+            case MotionEvent.BUTTON_STYLUS_PRIMARY:
+                return EvdevEncoder.BTN_RIGHT;
+            case MotionEvent.BUTTON_TERTIARY:
+                return EvdevEncoder.BTN_MIDDLE;
+            case MotionEvent.BUTTON_BACK:
+                return EvdevEncoder.BTN_SIDE;
+            case MotionEvent.BUTTON_FORWARD:
+                return EvdevEncoder.BTN_EXTRA;
+            default:
+                return 0;
+        }
+    }
+
+    // The daemon's key feed (grabbed keyboard) reports evdev codes; Ctrl+Alt+L releases the mouse.
+    private void onGrabbedKeys(@NonNull int[] codes, @NonNull int[] values) {
+        for (int i = 0; i < codes.length && i < values.length; i++) {
+            boolean down = values[i] != 0;
+            switch (codes[i]) {
+                case KEY_LEFTCTRL: case KEY_RIGHTCTRL: feedCtrl = down; break;
+                case KEY_LEFTALT: case KEY_RIGHTALT: feedAlt = down; break;
+                case KEY_L:
+                    if (down && feedCtrl && feedAlt && pointerCaptured) stopPointerCapture();
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
     // Host pointer hover (no button): TABLET mode only - absolute hover on the guest tablet.
     // MOUSE/TOUCH modes deliberately ignore Android-side hover.
     private boolean onSurfaceHover(View v, MotionEvent event) {
@@ -805,6 +1008,20 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
             return true;
         if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
             return super.dispatchKeyEvent(event);
+        // Mouse-lock release chord, for a keyboard the daemon has NOT grabbed (a grabbed one is
+        // heard via the key feed, see onPointerCaptureChanged).
+        if (keyCode == KeyEvent.KEYCODE_L) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN && pointerCaptured
+                && event.isCtrlPressed() && event.isAltPressed()) {
+                swallowChordKey = true;
+                stopPointerCapture();
+                return true;
+            }
+            if (swallowChordKey && event.getAction() == KeyEvent.ACTION_UP) {
+                swallowChordKey = false;
+                return true;
+            }
+        }
         if (inputForwarder != null && connected) {
             // Don't wrap a hardware modifier key in the panel's sticky modifiers; only real keys.
             boolean modifier = isModifierKey(keyCode);
@@ -974,6 +1191,9 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     private void showFabMenu() {
         var popup = new MaterialMenu(this, fabMenu);
         popup.inflate(R.menu.menu_native_display_menu);
+        var lockItem = popup.getMenu().findItem(R.id.menu_mouse_lock);
+        if (lockItem != null) lockItem.setTitle(mouseLockEnabled()
+            ? R.string.native_display_mouse_lock_on : R.string.native_display_mouse_lock_off);
         var header = new LinearLayout(this);
         header.setOrientation(LinearLayout.VERTICAL);
         header.addView(buildInputModeHeader(popup));
@@ -1026,6 +1246,13 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
             return true;
         } else if (id == R.id.menu_rotate) {
             toggleOrientation();
+            return true;
+        } else if (id == R.id.menu_mouse_lock) {
+            // Switches the auto-capture; turning it off also lets go of a capture in progress.
+            boolean on = !mouseLockEnabled();
+            getSharedPreferences(INPUT_PREFS, MODE_PRIVATE).edit()
+                .putBoolean(KEY_MOUSE_LOCK, on).apply();
+            if (!on) stopPointerCapture();
             return true;
         }
         return false;
@@ -1140,6 +1367,7 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
         keyboardGrab.setEcho(new PhysicalKeyboardGrab.Echo() {
             @Override
             public void onKeys(@NonNull int[] codes, @NonNull int[] values) {
+                if (pointerCaptured) onGrabbedKeys(codes, values);
                 for (int i = 0; i < codes.length && i < values.length; i++) {
                     int androidCode = KeyCodeMapper.evdevToAndroid(codes[i]);
                     // A key the drawn keyboard has no face for (media keys, F13 and up) is simply
@@ -1159,6 +1387,7 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
 
             @Override
             public void onCleared() {
+                feedCtrl = feedAlt = false;
                 phyKeyboard.clearHardwareKeys();
             }
         });
@@ -1167,6 +1396,8 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        // Android drops the capture on focus loss; also let go of held buttons ourselves.
+        if (!hasFocus) stopPointerCapture();
         // Android hands the clipboard only to the focused app: this is the moment to send it.
         if (hasFocus && clipboardBridge != null) clipboardBridge.onFocus();
     }
@@ -1188,12 +1419,14 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
         super.onPause();
         GamePerfHint.exitGameplay(this);
         SystemGestureGuard.exitDisplay();
+        stopPointerCapture();
         keyboardGrab.setResumed(false);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        stopPointerCapture();
         if (keyboardGrab != null) keyboardGrab.close();
         if (displaySource != null) {
             displaySource.shutdown();

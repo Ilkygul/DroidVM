@@ -79,6 +79,8 @@ public final class PhysicalKeyboardGrab {
     private Echo listener;
     /** Only the laptop keyboard draws keys, so only it is worth a feed. */
     private boolean laptop;
+    /** The console wants to see grabbed keys even without the drawn keyboard (see {@link #setKeyFeed}). */
+    private boolean keyFeed;
     /** What was last registered, so an unchanged state is not registered twice. */
     private boolean echoRegistered;
 
@@ -135,6 +137,17 @@ public final class PhysicalKeyboardGrab {
         apply();
     }
 
+    /**
+     * Asks for the copy of the grabbed keys in modes other than the laptop keyboard too. A grabbed
+     * keyboard never reaches the Activity, so this feed is the only way it can hear a chord (the
+     * mouse-lock release, Ctrl+Alt+L). Switched on only while that is needed, so the other
+     * modes still cost not one call.
+     */
+    public void setKeyFeed(boolean keyFeed) {
+        this.keyFeed = keyFeed;
+        apply();
+    }
+
     /** Who draws the keys as they are pressed; null to stop asking for them. */
     public void setEcho(@Nullable Echo echo) {
         this.listener = echo;
@@ -165,7 +178,7 @@ public final class PhysicalKeyboardGrab {
         }
         // The echo rides on the grab: no grab, no keys to copy. Registered only for the drawn
         // keyboard, so every other mode costs not one call.
-        boolean wantEcho = requested && laptop && listener != null;
+        boolean wantEcho = requested && (laptop || keyFeed) && listener != null;
         if (wantEcho != echoRegistered) {
             echoRegistered = wantEcho;
             sendEcho(wantEcho);

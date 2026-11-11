@@ -122,6 +122,23 @@ public final class InputForwarder {
     }
 
     /**
+     * Button on the RELATIVE mouse, whatever the input mode is. Captured-pointer input is raw
+     * deltas, so its buttons have to land on the same device as its motion even while the console
+     * is in TABLET mode (where {@link #sendPointerButton} would go to the absolute device).
+     */
+    public void sendRelativeButton(short button, boolean down) {
+        submit("relButton", () -> sink.write(MOUSE, EvdevEncoder.encodeMouseButton(button, down)));
+    }
+
+    /** Wheel notches on the relative mouse, whatever the input mode is; see {@link #sendRelativeButton}. */
+    public void sendRelativeScroll(int vNotches, int hNotches) {
+        submit("relScroll", () -> {
+            byte[] data = EvdevEncoder.encodeMouseWheel(vNotches, hNotches);
+            if (data != null) sink.write(MOUSE, data);
+        });
+    }
+
+    /**
      * Relative cursor motion (guest px) on the relative-mouse device; the guest renders the cursor.
      * Deltas are summed into the pending slot, so any number of calls between two worker turns
      * still costs one IPC round-trip and the pointer can't fall behind the finger.

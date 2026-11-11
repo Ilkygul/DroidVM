@@ -62,6 +62,9 @@ public final class EvdevEncoder {
     public static final short BTN_LEFT = 0x110;
     public static final short BTN_RIGHT = 0x111;
     public static final short BTN_MIDDLE = 0x112;
+    // Mouse side buttons (Android BACK / FORWARD), only used by the captured-pointer path.
+    public static final short BTN_SIDE = 0x113;
+    public static final short BTN_EXTRA = 0x114;
 
     /** Live Android pointer id -> evdev MT slot. Touched only on the worker thread. */
     private final Map<Integer, Integer> pointerSlots = new HashMap<>();

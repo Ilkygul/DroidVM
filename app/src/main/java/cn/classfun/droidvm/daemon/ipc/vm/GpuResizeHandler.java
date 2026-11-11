@@ -43,6 +43,8 @@ public final class GpuResizeHandler extends RequestHandler {
         int width = params.optInt("width", 0);
         int height = params.optInt("height", 0);
         int displayId = params.optInt("display_id", 0);
+        // Density for the EDID physical size; the guest derives its UI scale from it (0 = keep).
+        int dpi = params.optInt("dpi", 0);
         if (width < 320 || height < 200 || width > 7680 || height > 4320)
             throw new RequestException(fmt("unsupported size %dx%d", width, height));
         var inst = request.getContext().getVMs().findById(vmId);
@@ -52,8 +54,8 @@ public final class GpuResizeHandler extends RequestHandler {
         if (socketPath == null)
             throw new RequestException("VM has no control socket");
         var json = fmt(
-            "{\"GpuCommand\":{\"ResizeDisplay\":{\"display_id\":%d,\"width\":%d,\"height\":%d}}}",
-            displayId, width, height);
+            "{\"GpuCommand\":{\"ResizeDisplay\":{\"display_id\":%d,\"width\":%d,\"height\":%d,\"dpi\":%s}}}",
+            displayId, width, height, dpi >= 48 && dpi <= 1200 ? String.valueOf(dpi) : "null");
         String response;
         try (var socket = new LocalSocket(LocalSocket.SOCKET_SEQPACKET)) {
             socket.connect(new LocalSocketAddress(socketPath, FILESYSTEM));
@@ -63,7 +65,7 @@ public final class GpuResizeHandler extends RequestHandler {
             int n = socket.getInputStream().read(buf);
             response = n > 0 ? new String(buf, 0, n, UTF_8) : "";
         }
-        Log.i(TAG, fmt("resize %s display %d to %dx%d -> %s", vmId, displayId, width, height, response));
+        Log.i(TAG, fmt("resize %s display %d to %dx%d @%ddpi -> %s", vmId, displayId, width, height, dpi, response));
         if (!response.contains("DisplaysUpdated"))
             throw new RequestException(fmt("crosvm refused the resize: %s", response));
         var res = request.res();

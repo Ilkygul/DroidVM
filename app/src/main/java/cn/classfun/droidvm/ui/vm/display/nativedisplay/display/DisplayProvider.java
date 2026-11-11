@@ -136,6 +136,9 @@ final class DisplayProvider {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             mainView.setSurfaceLifecycle(SurfaceView.SURFACE_LIFECYCLE_FOLLOWS_ATTACHMENT);
         }
+        // Opaque: crosvm writes XRGB guest pixels into RGBA buffers, and a guest that leaves the X byte
+        // below 0xff (Windows does around icons and text) showed black squares through the surface.
+        mainView.getHolder().setFormat(android.graphics.PixelFormat.RGBX_8888);
         mainView.getHolder().addCallback(new Callback());
 
         var surface = mainView.getHolder().getSurface();

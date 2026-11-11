@@ -8,6 +8,10 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.net.Uri;
+import android.os.BatteryManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
@@ -33,12 +37,19 @@ import java.util.concurrent.Executors;
  * in use: the Android clipboard goes to the guest when the window gains focus and whenever it
  * changes while focused. Guest copies arrive any time the connection is up and are put on the
  * Android clipboard. Each side remembers what it last received so an update never echoes back.</p>
+ *
+ * <p>Two more line types share the connection: {@code "S <battery%> <charging 0|1> <temp-C>"} goes
+ * to the guest every 30 s (the guest agent shows the phone's state in its tray, as the Linux top
+ * bar did), and {@code "O " + base64(url)} from the guest opens that link on the phone.</p>
  */
 public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChangedListener {
     private static final String TAG = "ClipboardBridge";
     private static final int MAX_BYTES = 4 * 1024 * 1024;
 
     private final ClipboardManager clipboard;
+    private final Context context;
+    private final Runnable statusTick = this::sendStatusAndReschedule;
+    private static final long STATUS_PERIOD_MS = 30_000;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService sender = Executors.newSingleThreadExecutor();
     private final String host;
@@ -53,6 +64,7 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
     @Nullable private String lastSent;
 
     public ClipboardBridge(@NonNull Context context, @NonNull String host, int port) {
+        this.context = context;
         clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
         this.host = host;
         this.port = port;
@@ -70,6 +82,7 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
     public void stop() {
         if (!running) return;
         running = false;
+        main.removeCallbacks(statusTick);
         clipboard.removePrimaryClipChangedListener(this);
         closeSocket();
         if (reader != null) reader.interrupt();
@@ -125,10 +138,16 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
                 main.post(() -> {
                     lastSent = null; // a fresh guest session has nothing of ours yet
                     pushAndroidClipboard();
+                    main.removeCallbacks(statusTick);
+                    sendStatusAndReschedule();
                 });
                 var in = new BufferedReader(new InputStreamReader(s.getInputStream(), UTF_8));
                 String line;
                 while (running && (line = in.readLine()) != null) {
+                    if (line.startsWith("O ") && line.length() < 16384) {
+                        openOnPhone(new String(Base64.decode(line.substring(2), Base64.DEFAULT), UTF_8));
+                        continue;
+                    }
                     if (!line.startsWith("T ") || line.length() > MAX_BYTES * 2) continue;
                     final String text = new String(Base64.decode(line.substring(2), Base64.DEFAULT), UTF_8);
                     main.post(() -> {
@@ -150,6 +169,51 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
                 break;
             }
         }
+    }
+
+    /** Battery and temperature to the guest, then again in 30 s while connected. */
+    private void sendStatusAndReschedule() {
+        if (!running) return;
+        Intent b = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        if (b != null) {
+            int level = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+            int scale = b.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+            int plugged = b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
+            int temp = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0); // tenths of a degree
+            int pct = scale > 0 && level >= 0 ? level * 100 / scale : -1;
+            sendLine(String.format(java.util.Locale.ROOT, "S %d %d %.1f\n", pct, plugged != 0 ? 1 : 0, temp / 10.0));
+        }
+        main.postDelayed(statusTick, STATUS_PERIOD_MS);
+    }
+
+    private void sendLine(@NonNull String line) {
+        sender.execute(() -> {
+            var o = out;
+            if (o == null) return;
+            try {
+                o.write(line.getBytes(UTF_8));
+                o.flush();
+            } catch (Exception e) {
+                closeSocket();
+            }
+        });
+    }
+
+    /** A link the guest asked to open on the phone; only web and mail links, never other schemes. */
+    private void openOnPhone(@NonNull String url) {
+        var u = Uri.parse(url.trim());
+        var scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase(java.util.Locale.ROOT);
+        if (!scheme.equals("http") && !scheme.equals("https") && !scheme.equals("mailto")) {
+            Log.w(TAG, "guest asked to open a non-web link; ignored");
+            return;
+        }
+        main.post(() -> {
+            try {
+                context.startActivity(new Intent(Intent.ACTION_VIEW, u).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception e) {
+                Log.w(TAG, "no app to open " + scheme + " link", e);
+            }
+        });
     }
 
     private void closeSocket() {

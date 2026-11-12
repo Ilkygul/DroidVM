@@ -212,6 +212,9 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     private static final String KEY_MOUSE_LOCK = "display_mouse_lock";
     /** Captured-pointer speed in percent of the raw device motion (default 100). */
     private static final String KEY_CAPTURED_MOUSE_SPEED = "display_captured_mouse_speed";
+    /** Captured-pointer speed for touchpads in percent (default 50, as in the Linux environment). */
+    private static final String KEY_CAPTURED_TOUCHPAD_SPEED = "display_captured_touchpad_speed";
+    private static final int DEFAULT_CAPTURED_TOUCHPAD_SPEED = 50;
     // Evdev KEY_* codes of the release chord, as the daemon's key feed reports them.
     private static final int KEY_L = 38, KEY_LEFTCTRL = 29, KEY_LEFTALT = 56,
         KEY_RIGHTCTRL = 97, KEY_RIGHTALT = 100;
@@ -225,6 +228,9 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     private float capRemX, capRemY, capScrollV, capScrollH;
     private final java.util.HashSet<Short> capButtonsDown = new java.util.HashSet<>();
     private float capSpeed = 1f;
+    private float capTouchpadSpeed = 0.5f;
+    // Per-deviceId touchpad classification (physical capabilities survive pointer capture).
+    private final android.util.SparseBooleanArray capIsTouchpad = new android.util.SparseBooleanArray();
     // The click that starts a capture is swallowed up to its ACTION_UP, so it is not also a guest click.
     private boolean swallowMouseGesture = false;
     // Swallow the L that completes the release chord (down and up) so the guest sees neither half.
@@ -829,8 +835,39 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
         Log.i(TAG, "pointer capture requested");
         capSpeed = Math.max(1, getSharedPreferences(INPUT_PREFS, MODE_PRIVATE)
             .getInt(KEY_CAPTURED_MOUSE_SPEED, 100)) / 100f;
+        capTouchpadSpeed = Math.max(1, readPercentPref(KEY_CAPTURED_TOUCHPAD_SPEED,
+            DEFAULT_CAPTURED_TOUCHPAD_SPEED)) / 100f;
+        capIsTouchpad.clear();
         surfaceView.requestFocus();
         surfaceView.requestPointerCapture();
+    }
+
+    // The pref may be stored as an int or a float; tolerate both.
+    private int readPercentPref(@NonNull String key, int def) {
+        var sp = getSharedPreferences(INPUT_PREFS, MODE_PRIVATE);
+        try {
+            return sp.getInt(key, def);
+        } catch (ClassCastException e) {
+            try {
+                return Math.round(sp.getFloat(key, def));
+            } catch (ClassCastException e2) {
+                return def;
+            }
+        }
+    }
+
+    // Touchpad = the physical device advertises SOURCE_TOUCHPAD (also when it is a combined
+    // mouse+touchpad dock device). Event sources change under capture, device capabilities don't.
+    private boolean isCapturedTouchpad(@NonNull MotionEvent event) {
+        int id = event.getDeviceId();
+        int idx = capIsTouchpad.indexOfKey(id);
+        if (idx >= 0) return capIsTouchpad.valueAt(idx);
+        var dev = event.getDevice();
+        boolean tp = dev != null
+            && (dev.getSources() & android.view.InputDevice.SOURCE_TOUCHPAD)
+            == android.view.InputDevice.SOURCE_TOUCHPAD;
+        capIsTouchpad.put(id, tp);
+        return tp;
     }
 
     private void stopPointerCapture() {
@@ -896,8 +933,9 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
                     dx += event.getHistoricalX(i);
                     dy += event.getHistoricalY(i);
                 }
-                capRemX += dx * capSpeed;
-                capRemY += dy * capSpeed;
+                float speed = isCapturedTouchpad(event) ? capTouchpadSpeed : capSpeed;
+                capRemX += dx * speed;
+                capRemY += dy * speed;
                 int ix = (int) capRemX, iy = (int) capRemY;
                 if (ix != 0 || iy != 0) {
                     capRemX -= ix;

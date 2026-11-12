@@ -1732,4 +1732,6 @@
     <!-- U+1F512, as an entity: the base file stays ASCII (scripts/ci/check_ascii.py). -->
     <string name="usb_devices_locked_fmt" translatable="false">&#128274; %1$s</string>
     <string name="usb_devices_idle_kept">%1$s stays with the host: a driver of its would not let go, so it goes idle only when it is unplugged</string>
+    <string name="guest_key_interceptor_label">DroidVM: shortcuts to the VM</string>
+    <string name="guest_key_interceptor_description">Passes Alt+Tab, Alt+F4, Ctrl+Esc and Windows-key shortcuts to the VM while its console window has focus. It reads no screen content.</string>
 </resources>

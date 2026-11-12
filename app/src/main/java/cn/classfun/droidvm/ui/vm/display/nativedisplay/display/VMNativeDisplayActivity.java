@@ -1010,6 +1010,24 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
         }
     }
 
+    private static volatile VMNativeDisplayActivity focusedConsole;
+
+    /** The console window that currently has focus, for GuestKeyInterceptor; null otherwise. */
+    @Nullable
+    public static VMNativeDisplayActivity getFocusedConsole() {
+        return focusedConsole;
+    }
+
+    /** True when a key taken by GuestKeyInterceptor would actually reach the guest. */
+    public boolean acceptsInterceptedKeys() {
+        return inputForwarder != null && connected;
+    }
+
+    /** Runs a key the accessibility interceptor consumed through the normal guest path. */
+    public void injectInterceptedKey(@NonNull KeyEvent event) {
+        dispatchKeyEvent(event);
+    }
+
     @Override
     public boolean dispatchKeyEvent(@NonNull KeyEvent event) {
         int keyCode = event.getKeyCode();
@@ -1333,6 +1351,7 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     @Override
     protected void onStop() {
         super.onStop();
+        if (focusedConsole == this) focusedConsole = null;
         DexMetaKey.set(this, false);
         if (clipboardBridge != null) {
             clipboardBridge.stop();
@@ -1413,6 +1432,8 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) focusedConsole = this;
+        else if (focusedConsole == this) focusedConsole = null;
         // Android drops the capture on focus loss; also let go of held buttons ourselves.
         if (!hasFocus) stopPointerCapture();
         // Android hands the clipboard only to the focused app: this is the moment to send it.

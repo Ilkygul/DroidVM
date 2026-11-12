@@ -5,11 +5,14 @@ package cn.classfun.droidvm.ui.vm.display.nativedisplay.display;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
+import android.app.ActivityManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.ComponentCallbacks;
 import android.content.IntentFilter;
+import android.content.res.Configuration;
 import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Handler;
@@ -38,13 +41,33 @@ import java.util.concurrent.Executors;
  * changes while focused. Guest copies arrive any time the connection is up and are put on the
  * Android clipboard. Each side remembers what it last received so an update never echoes back.</p>
  *
- * <p>Two more line types share the connection: {@code "S <battery%> <charging 0|1> <temp-C>"} goes
- * to the guest every 30 s (the guest agent shows the phone's state in its tray, as the Linux top
- * bar did), and {@code "O " + base64(url)} from the guest opens that link on the phone.</p>
+ * <p>More line types share the connection:
+ * {@code "S <battery%> <charging 0|1> <temp-C> <ram_avail_MiB> <ram_total_MiB>"} goes to the guest
+ * every 30 s (the guest agent shows the phone's state in its tray; old guests accept the 4-field
+ * form too), {@code "D <dark 0|1>"} goes to the guest on connect and whenever Android's night mode
+ * changes (the guest switches Windows' light/dark theme; pref {@code display_theme_sync}), and
+ * {@code "O " + base64(url)} opens that link on the phone when it comes from the guest. Phone to
+ * guest, {@code O} carries a link or text shared from Android ("Openen in Windows").</p>
  */
 public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChangedListener {
     private static final String TAG = "ClipboardBridge";
     private static final int MAX_BYTES = 4 * 1024 * 1024;
+    /** The live bridge of the open console, for the share activity (null when none). */
+    @Nullable private static volatile ClipboardBridge active;
+
+    @Nullable public static ClipboardBridge getActive() {
+        return active;
+    }
+
+    private final boolean themeSync;
+    private int lastDark = -1;
+    private final ComponentCallbacks configWatcher = new ComponentCallbacks() {
+        @Override public void onConfigurationChanged(@NonNull Configuration c) {
+            sendThemeIfChanged();
+        }
+        @Override public void onLowMemory() {
+        }
+    };
 
     private final ClipboardManager clipboard;
     private final Context context;
@@ -63,7 +86,8 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
     /** Last text sent to the guest (main thread). */
     @Nullable private String lastSent;
 
-    public ClipboardBridge(@NonNull Context context, @NonNull String host, int port) {
+    public ClipboardBridge(@NonNull Context context, @NonNull String host, int port, boolean themeSync) {
+        this.themeSync = themeSync;
         this.context = context;
         clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
         this.host = host;
@@ -73,6 +97,8 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
     public void start() {
         if (running || clipboard == null) return;
         running = true;
+        active = this;
+        if (themeSync) context.registerComponentCallbacks(configWatcher);
         clipboard.addPrimaryClipChangedListener(this);
         reader = new Thread(this::loop, "ClipboardBridge");
         reader.setDaemon(true);
@@ -82,6 +108,8 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
     public void stop() {
         if (!running) return;
         running = false;
+        if (active == this) active = null;
+        if (themeSync) context.unregisterComponentCallbacks(configWatcher);
         main.removeCallbacks(statusTick);
         clipboard.removePrimaryClipChangedListener(this);
         closeSocket();
@@ -137,6 +165,7 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
                 Log.i(TAG, "connected to guest clipboard at " + host + ":" + port);
                 main.post(() -> {
                     lastSent = null; // a fresh guest session has nothing of ours yet
+                    lastDark = -1;
                     pushAndroidClipboard();
                     main.removeCallbacks(statusTick);
                     sendStatusAndReschedule();
@@ -174,6 +203,7 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
     /** Battery and temperature to the guest, then again in 30 s while connected. */
     private void sendStatusAndReschedule() {
         if (!running) return;
+        sendThemeIfChanged();
         Intent b = context.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
         if (b != null) {
             int level = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
@@ -181,9 +211,38 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
             int plugged = b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
             int temp = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0); // tenths of a degree
             int pct = scale > 0 && level >= 0 ? level * 100 / scale : -1;
-            sendLine(String.format(java.util.Locale.ROOT, "S %d %d %.1f\n", pct, plugged != 0 ? 1 : 0, temp / 10.0));
+            long availMiB = 0, totalMiB = 0;
+            var am = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                var mi = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                availMiB = mi.availMem >> 20;
+                totalMiB = mi.totalMem >> 20;
+            }
+            sendLine(String.format(java.util.Locale.ROOT, "S %d %d %.1f %d %d\n",
+                pct, plugged != 0 ? 1 : 0, temp / 10.0, availMiB, totalMiB));
         }
         main.postDelayed(statusTick, STATUS_PERIOD_MS);
+    }
+
+    /** Android night mode to the guest, on connect and when it changes. Main thread. */
+    private void sendThemeIfChanged() {
+        if (!themeSync || !running) return;
+        int dark = (context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+            == Configuration.UI_MODE_NIGHT_YES ? 1 : 0;
+        if (dark == lastDark || out == null) return;
+        lastDark = dark;
+        sendLine("D " + dark + "\n");
+    }
+
+    /** A link or text shared from Android, for the Windows side ("O " line). */
+    public void sendShared(@NonNull String text) {
+        if (text.getBytes(UTF_8).length > 8000) return;
+        sendLine("O " + Base64.encodeToString(text.getBytes(UTF_8), Base64.NO_WRAP) + "\n");
+    }
+
+    public boolean isConnected() {
+        return out != null;
     }
 
     private void sendLine(@NonNull String line) {

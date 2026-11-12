@@ -860,8 +860,12 @@ public final class CrosvmBackendInstance extends VMBackendInstance {
                 // forces use_venus and use_guest_vram host-side, so this is belt-and-suspenders.
                 // gpu_context_types overrides the capset list: a Windows guest (viogpu3d) needs virgl2
                 // next to venus, because its scanout blit runs in a virgl context.
-                gpuArg.append(",context-types=" + item.optString("gpu_context_types", "venus"));
-                gpuArg.append(",vulkan=true,egl=true,gles=true");
+                var contextTypes = item.optString("gpu_context_types", "venus");
+                gpuArg.append(",context-types=" + contextTypes);
+                // EGL/GLES only for virgl (host GL): virglrenderer 1.3 refuses to start when its vrend
+                // winsys has no EGL here, and venus/neptune don't need it.
+                boolean vrend = contextTypes.contains("virgl");
+                gpuArg.append(",vulkan=true,egl=" + vrend + ",gles=" + vrend);
                 // udmabuf gates VIRTIO_GPU_F_CREATE_GUEST_HANDLE, the guest-alloc blob path venus
                 // uses (guest owns the pool, hands the host dma-bufs) -- same contract as drm2kgsl.
                 // No external-blob: create_gpu_device forces it from is_sandboxed||fixed_blob_mapping

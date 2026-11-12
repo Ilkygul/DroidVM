@@ -13,6 +13,8 @@ import android.content.Intent;
 import android.content.ComponentCallbacks;
 import android.content.IntentFilter;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Handler;
@@ -22,12 +24,18 @@ import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.content.FileProvider;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.security.MessageDigest;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -41,6 +49,13 @@ import java.util.concurrent.Executors;
  * changes while focused. Guest copies arrive any time the connection is up and are put on the
  * Android clipboard. Each side remembers what it last received so an update never echoes back.</p>
  *
+ * <p>Images travel the same way as {@code "I " + base64(PNG) + "\n"} (max 16 MB decoded, larger
+ * ones are skipped; a base64 line can thus be ~22 MB, so line limits are per record type). Phone to
+ * guest: when the primary clip is an image content URI it is read, re-encoded to PNG if needed and
+ * sent. Guest to phone: the PNG is written to {@code cache/clip/} and offered through
+ * {@link ClipFileProvider} ({@code <applicationId>.clipprovider}) as a content-URI clip. A SHA-256
+ * of the last image received/sent per side prevents echo loops.</p>
+ *
  * <p>More line types share the connection:
  * {@code "S <battery%> <charging 0|1> <temp-C> <ram_avail_MiB> <ram_total_MiB>"} goes to the guest
  * every 30 s (the guest agent shows the phone's state in its tray; old guests accept the 4-field
@@ -52,6 +67,10 @@ import java.util.concurrent.Executors;
 public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChangedListener {
     private static final String TAG = "ClipboardBridge";
     private static final int MAX_BYTES = 4 * 1024 * 1024;
+    /** Largest decoded image (PNG bytes) either way. */
+    private static final int MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+    /** Longest "I " line: base64 of MAX_IMAGE_BYTES plus prefix/slack. */
+    private static final int MAX_IMAGE_LINE = (MAX_IMAGE_BYTES / 3 + 1) * 4 + 16;
     /** The live bridge of the open console, for the share activity (null when none). */
     @Nullable private static volatile ClipboardBridge active;
 
@@ -85,6 +104,9 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
     @Nullable private String lastFromGuest;
     /** Last text sent to the guest (main thread). */
     @Nullable private String lastSent;
+    /** SHA-256 (base64) of the last image from the guest / sent to the guest (any thread). */
+    @Nullable private volatile String lastImageFromGuest;
+    @Nullable private volatile String lastImageSent;
 
     public ClipboardBridge(@NonNull Context context, @NonNull String host, int port, boolean themeSync) {
         this.themeSync = themeSync;
@@ -132,6 +154,12 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
         try {
             ClipData clip = clipboard.getPrimaryClip();
             if (clip == null || clip.getItemCount() == 0) return;
+            Uri imageUri = clip.getItemAt(0).getUri();
+            if (imageUri != null && clip.getDescription() != null
+                && clip.getDescription().hasMimeType("image/*")) {
+                pushImage(imageUri);
+                return;
+            }
             CharSequence cs = clip.getItemAt(0).coerceToText(null);
             if (cs == null) return;
             text = cs.toString();
@@ -156,6 +184,126 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
         });
     }
 
+    /** Read the clipboard image off the main thread, normalise to PNG and send it as an "I " line. */
+    private void pushImage(@NonNull Uri uri) {
+        if (out == null) return; // the connect pushes again
+        sender.execute(() -> {
+            try {
+                byte[] png = readImageAsPng(uri);
+                if (png == null) return;
+                String h = hash(png);
+                if (h.equals(lastImageFromGuest) || h.equals(lastImageSent)) return;
+                var o = out;
+                if (o == null) return;
+                lastImageSent = h;
+                byte[] b64 = Base64.encode(png, Base64.NO_WRAP);
+                try {
+                    synchronized (o) {
+                        o.write('I');
+                        o.write(' ');
+                        o.write(b64);
+                        o.write('\n');
+                        o.flush();
+                    }
+                } catch (Exception e) {
+                    closeSocket();
+                }
+            } catch (SecurityException e) {
+                // not focused after all
+            } catch (Throwable e) {
+                Log.w(TAG, "clipboard image not sent", e);
+            }
+        });
+    }
+
+    /** The image behind the URI as PNG bytes, or null when too large / unreadable. */
+    @Nullable
+    private byte[] readImageAsPng(@NonNull Uri uri) throws IOException {
+        byte[] data;
+        try (InputStream in = context.getContentResolver().openInputStream(uri)) {
+            if (in == null) return null;
+            var bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+                if (bos.size() > MAX_IMAGE_BYTES) return null; // too large
+            }
+            data = bos.toByteArray();
+        }
+        if (isPng(data, data.length)) return data;
+        Bitmap bmp = BitmapFactory.decodeByteArray(data, 0, data.length);
+        if (bmp == null) return null;
+        try {
+            var bos = new ByteArrayOutputStream();
+            if (!bmp.compress(Bitmap.CompressFormat.PNG, 100, bos)) return null;
+            return bos.size() > MAX_IMAGE_BYTES ? null : bos.toByteArray();
+        } finally {
+            bmp.recycle();
+        }
+    }
+
+    private static boolean isPng(@NonNull byte[] d, int len) {
+        return len > 8 && (d[0] & 0xFF) == 0x89 && d[1] == 'P' && d[2] == 'N' && d[3] == 'G';
+    }
+
+    @NonNull
+    private static String hash(@NonNull byte[] d) {
+        try {
+            return Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(d), Base64.NO_WRAP);
+        } catch (Exception e) {
+            return "len" + d.length;
+        }
+    }
+
+    /** PNG from the guest: store under cache/clip/ and put a content-URI clip on the clipboard. */
+    private void receiveImage(@NonNull byte[] png) {
+        String h = hash(png);
+        if (h.equals(lastImageFromGuest)) return;
+        File dir = new File(context.getCacheDir(), "clip");
+        File[] old = dir.listFiles();
+        if (old != null) for (File f : old) //noinspection ResultOfMethodCallIgnored
+            f.delete();
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        File f = new File(dir, "windows-" + System.currentTimeMillis() + ".png");
+        try (var fo = new FileOutputStream(f)) {
+            fo.write(png);
+        } catch (IOException e) {
+            Log.w(TAG, "cannot store guest image", e);
+            return;
+        }
+        final Uri uri = FileProvider.getUriForFile(context, context.getPackageName() + ".clipprovider", f);
+        lastImageFromGuest = h;
+        lastImageSent = h;
+        main.post(() -> {
+            try {
+                clipboard.setPrimaryClip(ClipData.newUri(context.getContentResolver(), "Windows", uri));
+            } catch (Exception e) {
+                Log.w(TAG, "cannot set image clip", e);
+            }
+        });
+    }
+
+    /** One line (without the newline); empty array for an over-long line (skipped); null at EOF. */
+    @Nullable
+    private static byte[] readLine(@NonNull InputStream in) throws IOException {
+        var buf = new ByteArrayOutputStream(256);
+        boolean overflow = false, any = false;
+        int c;
+        while ((c = in.read()) >= 0) {
+            any = true;
+            if (c == '\n') break;
+            if (overflow) continue;
+            if (buf.size() >= MAX_IMAGE_LINE) {
+                overflow = true;
+                buf.reset();
+            } else buf.write(c);
+        }
+        if (!any) return null;
+        return overflow ? new byte[0] : buf.toByteArray();
+    }
+
     private void loop() {
         while (running) {
             try (var s = new Socket()) {
@@ -165,25 +313,30 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
                 Log.i(TAG, "connected to guest clipboard at " + host + ":" + port);
                 main.post(() -> {
                     lastSent = null; // a fresh guest session has nothing of ours yet
+                    lastImageSent = null;
                     lastDark = -1;
                     pushAndroidClipboard();
                     main.removeCallbacks(statusTick);
                     sendStatusAndReschedule();
                 });
-                var in = new BufferedReader(new InputStreamReader(s.getInputStream(), UTF_8));
-                String line;
-                while (running && (line = in.readLine()) != null) {
-                    if (line.startsWith("O ") && line.length() < 16384) {
-                        openOnPhone(new String(Base64.decode(line.substring(2), Base64.DEFAULT), UTF_8));
-                        continue;
+                var in = new BufferedInputStream(s.getInputStream(), 65536);
+                byte[] line;
+                while (running && (line = readLine(in)) != null) {
+                    int len = line.length;
+                    if (len < 3 || line[1] != ' ') continue;
+                    if (line[0] == 'O' && len < 16384) {
+                        openOnPhone(new String(Base64.decode(line, 2, len - 2, Base64.DEFAULT), UTF_8));
+                    } else if (line[0] == 'I') {
+                        byte[] png = Base64.decode(line, 2, len - 2, Base64.DEFAULT);
+                        if (png.length <= MAX_IMAGE_BYTES && isPng(png, png.length)) receiveImage(png);
+                    } else if (line[0] == 'T' && len <= MAX_BYTES * 2) {
+                        final String text = new String(Base64.decode(line, 2, len - 2, Base64.DEFAULT), UTF_8);
+                        main.post(() -> {
+                            lastFromGuest = text;
+                            lastSent = text;
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Windows", text));
+                        });
                     }
-                    if (!line.startsWith("T ") || line.length() > MAX_BYTES * 2) continue;
-                    final String text = new String(Base64.decode(line.substring(2), Base64.DEFAULT), UTF_8);
-                    main.post(() -> {
-                        lastFromGuest = text;
-                        lastSent = text;
-                        clipboard.setPrimaryClip(ClipData.newPlainText("Windows", text));
-                    });
                 }
             } catch (Exception e) {
                 // guest agent not up (yet): try again in a moment
@@ -250,8 +403,10 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
             var o = out;
             if (o == null) return;
             try {
-                o.write(line.getBytes(UTF_8));
-                o.flush();
+                synchronized (o) {
+                    o.write(line.getBytes(UTF_8));
+                    o.flush();
+                }
             } catch (Exception e) {
                 closeSocket();
             }

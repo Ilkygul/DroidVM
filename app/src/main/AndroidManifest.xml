@@ -290,6 +290,16 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <provider
+            android:name=".ui.vm.display.nativedisplay.display.ClipFileProvider"
+            android:authorities="${applicationId}.clipprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/clip_paths" />
+        </provider>
+
         <service
             android:name=".lib.download.DiskDownloadService"
             android:exported="false"

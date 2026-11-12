@@ -177,6 +177,8 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     /** Share the clipboard with a guest agent on the NAT network (default on). */
     private static final String KEY_CLIPBOARD = "display_clipboard";
     /** Guest address of that agent; the Windows image's NAT lease is 10.77.0.100. */
+    /** Follow Android light/dark mode in the guest (default on). */
+    private static final String KEY_THEME_SYNC = "display_theme_sync";
     private static final String KEY_CLIPBOARD_HOST = "display_clipboard_host";
 
     /** Guest UI size relative to Android's on the same screen, in percent (desktop UIs sit denser). */
@@ -1341,7 +1343,8 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
         var prefs = getSharedPreferences(INPUT_PREFS, MODE_PRIVATE);
         if (prefs.getBoolean(KEY_CLIPBOARD, true)) {
             clipboardBridge = new ClipboardBridge(this,
-                prefs.getString(KEY_CLIPBOARD_HOST, "10.77.0.100"), 6201);
+                prefs.getString(KEY_CLIPBOARD_HOST, "10.77.0.100"), 6201,
+                prefs.getBoolean(KEY_THEME_SYNC, true));
             clipboardBridge.start();
         }
         var handler = ((DroidVMApp) getApplication()).getVMEventHandler();

@@ -41,6 +41,19 @@
         android:usesCleartextTraffic="true">
 
         <activity
+            android:name=".ui.vm.display.nativedisplay.display.ShareToWindowsActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="Openen in Windows"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name=".ui.SplashActivity"
             android:exported="true"
             android:theme="@style/Theme.DroidVM.Splash"

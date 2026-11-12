@@ -1333,6 +1333,7 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
     @Override
     protected void onStop() {
         super.onStop();
+        DexMetaKey.set(this, false);
         if (clipboardBridge != null) {
             clipboardBridge.stop();
             clipboardBridge = null;
@@ -1416,6 +1417,10 @@ public final class VMNativeDisplayActivity extends AppCompatActivity
         if (!hasFocus) stopPointerCapture();
         // Android hands the clipboard only to the focused app: this is the moment to send it.
         if (hasFocus && clipboardBridge != null) clipboardBridge.onFocus();
+        // DeX: the Windows key and its chords go to the guest while the console has focus.
+        if (getSharedPreferences(INPUT_PREFS, MODE_PRIVATE).getBoolean("display_meta_key", true)) {
+            DexMetaKey.set(this, hasFocus);
+        }
     }
 
     @Override

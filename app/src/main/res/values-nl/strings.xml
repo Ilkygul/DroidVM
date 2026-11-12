@@ -3,4 +3,6 @@
     <string name="native_display_mouse_locked">Muis vergrendeld — Ctrl+Alt+L om los te laten</string>
     <string name="native_display_mouse_lock_on">Muisvergrendeling: aan</string>
     <string name="native_display_mouse_lock_off">Muisvergrendeling: uit</string>
+    <string name="guest_key_interceptor_label">DroidVM: sneltoetsen naar de VM</string>
+    <string name="guest_key_interceptor_description">Stuurt Alt+Tab, Alt+F4, Ctrl+Esc en Windows-toetscombinaties naar de VM zolang het consolevenster focus heeft. Leest geen scherminhoud.</string>
 </resources>

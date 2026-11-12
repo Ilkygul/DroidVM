@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Images copied in the guest, offered to Android apps via the clipboard (ClipboardBridge) -->
+    <cache-path
+        name="clip"
+        path="clip/" />
+</paths>

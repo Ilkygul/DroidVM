@@ -415,12 +415,23 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
 
     /**
      * A link the guest asked to open on the phone: web and mail links, or android-app://&lt;package&gt;,
-     * which starts that installed app's launcher activity (the Windows Start menu "Android apps" entries).
+     * which starts that installed app's launcher activity (the Windows Start menu "Android apps" entries),
+     * or droidvm://minimize, which sends the VM window to the back.
      * Never other schemes or arbitrary intents.
      */
     private void openOnPhone(@NonNull String url) {
         var u = Uri.parse(url.trim());
         var scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase(java.util.Locale.ROOT);
+        if (scheme.equals("droidvm") && "minimize".equals(u.getHost())) {
+            // Windows shortcut "DroidVM minimaliseren": send the VM window to the back, like the
+            // minimize-to-Android button of the Linux desktop. The VM keeps running.
+            main.post(() -> {
+                if (context instanceof android.app.Activity) {
+                    ((android.app.Activity) context).moveTaskToBack(true);
+                }
+            });
+            return;
+        }
         if (scheme.equals("android-app")) {
             var pkg = u.getHost();
             if (pkg == null || !pkg.matches("[A-Za-z0-9_.]+")) return;

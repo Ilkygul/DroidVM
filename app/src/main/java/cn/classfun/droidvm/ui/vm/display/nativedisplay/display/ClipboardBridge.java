@@ -413,10 +413,39 @@ public final class ClipboardBridge implements ClipboardManager.OnPrimaryClipChan
         });
     }
 
-    /** A link the guest asked to open on the phone; only web and mail links, never other schemes. */
+    /**
+     * A link the guest asked to open on the phone: web and mail links, or android-app://&lt;package&gt;,
+     * which starts that installed app's launcher activity (the Windows Start menu "Android apps" entries).
+     * Never other schemes or arbitrary intents.
+     */
     private void openOnPhone(@NonNull String url) {
         var u = Uri.parse(url.trim());
         var scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase(java.util.Locale.ROOT);
+        if (scheme.equals("android-app")) {
+            var pkg = u.getHost();
+            if (pkg == null || !pkg.matches("[A-Za-z0-9_.]+")) return;
+            main.post(() -> {
+                try {
+                    var launch = context.getPackageManager().getLaunchIntentForPackage(pkg);
+                    if (launch == null) {
+                        Log.w(TAG, "no launcher activity for " + pkg);
+                        return;
+                    }
+                    launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    var opts = android.app.ActivityOptions.makeBasic();
+                    try {
+                        var d = context.getDisplay();
+                        if (d != null) opts.setLaunchDisplayId(d.getDisplayId());
+                    } catch (Exception ignored) {
+                        // non-visual context: Android picks the display
+                    }
+                    context.startActivity(launch, opts.toBundle());
+                } catch (Exception e) {
+                    Log.w(TAG, "could not start " + pkg, e);
+                }
+            });
+            return;
+        }
         if (!scheme.equals("http") && !scheme.equals("https") && !scheme.equals("mailto")) {
             Log.w(TAG, "guest asked to open a non-web link; ignored");
             return;

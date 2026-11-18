@@ -43,6 +43,7 @@ import cn.classfun.droidvm.daemon.vm.VMBackendInstance;
 import cn.classfun.droidvm.daemon.vm.VMStartResult;
 import cn.classfun.droidvm.daemon.audio.HostAudioTable;
 import cn.classfun.droidvm.lib.data.HostAudioDevices;
+import cn.classfun.droidvm.lib.hugepage.MemoryHook;
 import cn.classfun.droidvm.lib.natives.NativeProcess;
 import cn.classfun.droidvm.lib.utils.RunUtils;
 import cn.classfun.droidvm.lib.store.base.DataItem;
@@ -313,7 +314,8 @@ public final class CrosvmBackendInstance extends VMBackendInstance {
         args.add("--name");
         args.add(config.getName());
         args.add("--mem");
-        args.add(String.valueOf(Math.max(item.optLong("memory_mb", 512), 64)));
+        // the run size a memory hook chose, else memory_mb (see MemoryHook)
+        args.add(String.valueOf(MemoryHook.effectiveMb(config.getId(), item)));
         args.add("--cpus");
         args.add(String.valueOf(Math.max(item.optLong("cpu_count", 1), 1)));
         buildCpuPlacementCommand(args);

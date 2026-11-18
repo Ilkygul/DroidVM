@@ -29,7 +29,9 @@ import java.util.UUID;
 import cn.classfun.droidvm.daemon.console.ConsoleStream;
 import cn.classfun.droidvm.daemon.vm.backend.BackendBase;
 import cn.classfun.droidvm.lib.data.CrosvmExit;
+import cn.classfun.droidvm.lib.hugepage.MemoryHook;
 import cn.classfun.droidvm.lib.hugepage.PoolPreflight;
+import cn.classfun.droidvm.lib.store.vm.GuestPoolSizing;
 import cn.classfun.droidvm.lib.natives.NativeProcess;
 import cn.classfun.droidvm.lib.natives.UnixHelper;
 import cn.classfun.droidvm.lib.store.base.DataItem;
@@ -472,6 +474,37 @@ public final class VMInstance extends VMConfig {
         }
         if (bootPlan.entryFallback)
             fireEvent("boot_entry_fallback", null);
+        // A root module may size this run to what it could free (see MemoryHook). Done here, in
+        // the worker, so a start from the app, an auto-start and a reboot relaunch all get it and
+        // nobody waits on the socket while the module works.
+        boolean hooked = false;
+        if (PoolPreflight.appliesTo(item)) {
+            var sio = getStream("stdio");
+            long mb = MemoryHook.prepare(getId(), item, GuestPoolSizing.bootGuestPreallocMb(item),
+                line -> {
+                    Log.i(TAG, fmt("VM %s: %s", getName(), line));
+                    if (sio != null) sio.appendBuffer(line + "\n");
+                });
+            if (mb == MemoryHook.REFUSED) {
+                // the module freed less than its minimum and has already given the reserve back
+                if (sio != null)
+                    sio.appendBuffer("start called off: too little memory for this VM right now\n");
+                exitCode = -1;
+                setState(VMState.STOPPED);
+                fireEvent("exited", null);
+                return;
+            }
+            hooked = mb > 0;
+            if (hooked) {
+                var ex = new JSONObject();
+                try {
+                    ex.put("memory_mb", mb);
+                    ex.put("memory_mb_configured", item.optLong("memory_mb", 0));
+                } catch (JSONException ignored) {
+                }
+                fireEvent("memory_sized", ex);
+            }
+        }
         VMStartResult result;
         try {
             result = inst.start();
@@ -482,6 +515,7 @@ public final class VMInstance extends VMConfig {
         }
         if (!result.isSuccess()) {
             exitCode = -1;
+            if (PoolPreflight.appliesTo(item)) MemoryHook.release(getId());
             setState(VMState.STOPPED);
             fireEvent("exited", null);
             return;
@@ -555,6 +589,9 @@ public final class VMInstance extends VMConfig {
             return;
         }
         nprocGuardResetBestEffort();
+        // Finally stopped (a reboot keeps its memory and returned above): the module may hand the
+        // reserve back to Android now instead of waiting for its own guard to notice.
+        if (PoolPreflight.appliesTo(item)) MemoryHook.release(getId());
         setState(VMState.STOPPED);
         fireEvent("exited", null);
     }
@@ -613,7 +650,9 @@ public final class VMInstance extends VMConfig {
             // relaunch exits with ENOMEM (measured: reserve at 526 of 2542 pages when the
             // relaunch started, full again nine seconds later). Nobody is watching a reboot, so
             // it waits like any other background start -- see PoolPreflight.waitForPool.
-            if (!PoolPreflight.waitForPool(item, PoolPreflight.RELAUNCH_ATTEMPTS,
+            // With a memory hook the relaunch is sized by the hook in runVM instead: waiting here
+            // for the configured size (the ceiling, not what this run had) would only cost 20 s.
+            if (!MemoryHook.sized(getId()) && !PoolPreflight.waitForPool(item, PoolPreflight.RELAUNCH_ATTEMPTS,
                 PoolPreflight.BACKGROUND_INTERVAL_MS, PoolPreflight.BACKGROUND_ACQUIRE_AT))
                 Log.w(TAG, fmt("VM %s relaunching with the reserve still short", getName()));
             if (state != VMState.REBOOTING) return; // stopped while we waited

@@ -17,6 +17,7 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 
+import cn.classfun.droidvm.lib.hugepage.MemoryHook;
 import cn.classfun.droidvm.lib.hugepage.PoolPreflight;
 import cn.classfun.droidvm.daemon.network.NetworkInstanceStore;
 import cn.classfun.droidvm.daemon.server.ServerContext;
@@ -225,7 +226,8 @@ public final class VMInstanceStore extends DataStore<VMInstance> {
                 Log.i(TAG, "the daemon is going down; abandoning the rest of the auto-start sweep");
                 return;
             }
-            PoolPreflight.waitForPool(inst.item, PoolPreflight.BACKGROUND_ATTEMPTS,
+            // a memory hook sizes the VM to what it frees (MemoryHook): nothing to wait for
+            if (MemoryHook.find() == null) PoolPreflight.waitForPool(inst.item, PoolPreflight.BACKGROUND_ATTEMPTS,
                 PoolPreflight.BACKGROUND_INTERVAL_MS, PoolPreflight.BACKGROUND_ACQUIRE_AT,
                 () -> shuttingDown);
             // Read again: the VM may have been started by a client, or deleted, while we waited,

@@ -53,6 +53,7 @@ import cn.classfun.droidvm.ui.disk.action.BackingChainLinker;
 import cn.classfun.droidvm.ui.disk.tree.DiskTree;
 import cn.classfun.droidvm.lib.store.vm.LendMthpMode;
 import cn.classfun.droidvm.lib.store.vm.VMBackend;
+import cn.classfun.droidvm.lib.hugepage.MemoryHook;
 import cn.classfun.droidvm.lib.hugepage.PoolPreflight;
 import cn.classfun.droidvm.lib.store.vm.ProtectedVM;
 import cn.classfun.droidvm.ui.hugepage.HugePageActivity;
@@ -442,6 +443,17 @@ public final class VMActions {
         @NonNull Runnable proceed
     ) {
         runOnPool(() -> {
+            // A root module sizes the VM to what it can free (MemoryHook): no question to ask,
+            // the daemon prepares the memory and starts with the most that fits.
+            if (PoolPreflight.appliesTo(config.item) && MemoryHook.present()) {
+                mainHandler.post(() -> {
+                    if (ui.isAlive())
+                        Toast.makeText(ui.getContext(), R.string.vm_memory_hook_preparing,
+                            Toast.LENGTH_SHORT).show();
+                    proceed.run();
+                });
+                return;
+            }
             var status = PoolPreflight.check(config.item);
             if (status.isEnough()) {
                 mainHandler.post(proceed);
